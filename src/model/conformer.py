@@ -2,9 +2,11 @@ from torch import nn
 from torch.nn import Sequential
 
 
-class BaselineModel(nn.Module):
+class Conformer(nn.Module):
     """
-    Simple MLP
+    Conformer model implemented by the paper:
+        https://arxiv.org/pdf/2005.08100
+    
     """
 
     def __init__(self, n_feats, n_tokens, fc_hidden=512):
@@ -50,7 +52,7 @@ class BaselineModel(nn.Module):
         Returns:
             output_lengths (Tensor): new temporal lengths
         """
-        return input_lengths  # we don't reduce time dimension here
+        return input_lengths
 
     def __str__(self):
         """
@@ -66,3 +68,63 @@ class BaselineModel(nn.Module):
         result_info = result_info + f"\nTrainable parameters: {trainable_parameters}"
 
         return result_info
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, n_feats, n_tokens, fc_hidden=512):
+        super().__init__()
+
+        self.net = Sequential()
+
+    def forward(self, spectrogram, spectrogram_length, **batch):
+        return None
+    
+
+class AttentionHead(nn.Module):
+    def __init__(self, n_feats, n_tokens, fc_hidden=512):
+        super().__init__()
+
+        self.net = Sequential()
+
+    def forward(self, spectrogram, spectrogram_length, **batch):
+        return None
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, n_feats, n_tokens, fc_hidden=512):
+        super().__init__()
+
+        self.net = Sequential()
+
+    def forward(self, spectrogram, spectrogram_length, **batch):
+        return None
+
+
+class Conv2dSubsampling(nn.Module):
+    def __init__(self, n_feats, n_tokens, fc_hidden=512):
+        super().__init__()
+
+        self.net = Sequential()
+
+    def forward(self, spectrogram, spectrogram_length, **batch):
+        return None
+
+
+class PositionalEncoder(nn.Module):
+    def __init__(self, n_feats, n_tokens, fc_hidden=512):
+        super().__init__()
+
+        self.net = Sequential()
+
+    def forward(self, spectrogram, spectrogram_length, **batch):
+        return None
+
+
+class ConformerBlock(nn.Module):
+    def __init__(self, n_feats, n_tokens, fc_hidden=512):
+        super().__init__()
+
+        self.net = Sequential()
+
+    def forward(self, spectrogram, spectrogram_length, **batch):
+        return None

@@ -2,7 +2,6 @@ import logging
 import random
 
 import numpy as np
-import torch
 import torchaudio
 from torch.utils.data import Dataset
 

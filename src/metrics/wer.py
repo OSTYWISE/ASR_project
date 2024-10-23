@@ -16,9 +16,7 @@ class ArgmaxWERMetric(BaseMetric):
         super().__init__(*args, **kwargs)
         self.text_encoder = text_encoder
 
-    def __call__(
-        self, log_probs: Tensor, log_probs_length: Tensor, text: List[str], **kwargs
-    ):
+    def __call__(self, log_probs: Tensor, log_probs_length: Tensor, text: List[str], **kwargs):
         wers = []
         predictions = torch.argmax(log_probs.cpu(), dim=-1).numpy()
         lengths = log_probs_length.detach().numpy()

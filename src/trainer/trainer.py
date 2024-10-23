@@ -41,10 +41,10 @@ class Trainer(BaseTrainer):
             self.optimizer.zero_grad()
 
         outputs = self.model(**batch)
-        batch.update(outputs)
+        batch.update(outputs)  # ['audio', 'spectrogram', 'text_encoded', 'text', 'audio_path', 'spectrogram_length', 'text_encoded_length', 'log_probs', 'log_probs_length']
 
         all_losses = self.criterion(**batch)
-        batch.update(all_losses)
+        batch.update(all_losses)  # ['audio', 'spectrogram', 'text_encoded', 'text', 'audio_path', 'spectrogram_length', 'text_encoded_length', 'log_probs', 'log_probs_length', 'loss']
 
         if self.is_train:
             batch["loss"].backward()  # sum of all losses is always called loss

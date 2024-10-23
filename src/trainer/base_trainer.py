@@ -251,6 +251,27 @@ class BaseTrainer:
             logs.update(**{f"{part}_{name}": value for name, value in val_logs.items()})
 
         return logs
+    
+    def process_batch(self, batch, metrics: MetricTracker):
+        """
+        Run batch through the model, compute metrics, compute loss,
+        and do training step (during training stage).
+
+        The function expects that criterion aggregates all losses
+        (if there are many) into a single one defined in the 'loss' key.
+
+        Args:
+            batch (dict): dict-based batch containing the data from
+                the dataloader.
+            metrics (MetricTracker): MetricTracker object that computes
+                and aggregates the metrics. The metrics depend on the type of
+                the partition (train or inference).
+        Returns:
+            batch (dict): dict-based batch containing the data from
+                the dataloader (possibly transformed via batch transform),
+                model outputs, and losses.
+        """
+        raise NotImplementedError
 
     def _evaluation_epoch(self, epoch, part, dataloader):
         """
