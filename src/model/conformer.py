@@ -1,4 +1,4 @@
-from torch import nn
+from torch import nn, Tensor
 from torch.nn import Sequential
 
 
@@ -6,10 +6,9 @@ class Conformer(nn.Module):
     """
     Conformer model implemented by the paper:
         https://arxiv.org/pdf/2005.08100
-    
     """
 
-    def __init__(self, n_feats, n_tokens, fc_hidden=512):
+    def __init__(self, n_feats: int, n_tokens: int, fc_hidden: int = 512):
         """
         Args:
             n_feats (int): number of input features.
@@ -26,7 +25,7 @@ class Conformer(nn.Module):
             nn.Linear(in_features=fc_hidden, out_features=n_tokens),
         )
 
-    def forward(self, spectrogram, spectrogram_length, **batch):
+    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> dict[str, Tensor]:
         """
         Model forward method.
 
@@ -42,7 +41,7 @@ class Conformer(nn.Module):
         log_probs_length = self.transform_input_lengths(spectrogram_length)
         return {"log_probs": log_probs, "log_probs_length": log_probs_length}
 
-    def transform_input_lengths(self, input_lengths):
+    def transform_input_lengths(self, input_lengths: Tensor) -> Tensor:
         """
         As the network may compress the Time dimension, we need to know
         what are the new temporal lengths after compression.
@@ -76,7 +75,7 @@ class MultiHeadAttention(nn.Module):
 
         self.net = Sequential()
 
-    def forward(self, spectrogram, spectrogram_length, **batch):
+    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
         return None
     
 
@@ -86,7 +85,7 @@ class AttentionHead(nn.Module):
 
         self.net = Sequential()
 
-    def forward(self, spectrogram, spectrogram_length, **batch):
+    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
         return None
 
 
@@ -96,7 +95,7 @@ class ConvBlock(nn.Module):
 
         self.net = Sequential()
 
-    def forward(self, spectrogram, spectrogram_length, **batch):
+    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
         return None
 
 
@@ -106,7 +105,7 @@ class Conv2dSubsampling(nn.Module):
 
         self.net = Sequential()
 
-    def forward(self, spectrogram, spectrogram_length, **batch):
+    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
         return None
 
 
@@ -116,7 +115,7 @@ class PositionalEncoder(nn.Module):
 
         self.net = Sequential()
 
-    def forward(self, spectrogram, spectrogram_length, **batch):
+    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
         return None
 
 
@@ -126,5 +125,5 @@ class ConformerBlock(nn.Module):
 
         self.net = Sequential()
 
-    def forward(self, spectrogram, spectrogram_length, **batch):
+    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
         return None
