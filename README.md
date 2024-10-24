@@ -55,6 +55,7 @@ Follow these steps to install the project:
 3. In order to avoid any problems with audio [ffmpeg](https://www.ffmpeg.org/) is recommended to install.
 
 4. The project is exploiting MLOps platforms: [CometML](https://www.comet.com/) or [Wandb](https://wandb.ai/site/). 
+
 You should create your account, get api_key and create variable COMETML_API_KEY or WANDB_API_KEY to be able to run train.py.
 
 ## How To Use
@@ -75,10 +76,10 @@ python3 inference.py HYDRA_CONFIG_ARGUMENTS
 
 ## Credits / Acknowledgments
 
-This repository is based on a [PyTorch Project Template](https://github.com/Blinorot/pytorch_project_template).
-Some optimization tricks are taken from Andrej Karpathy [nanoGPT repo](https://github.com/karpathy/nanoGPT/tree/master)
-Part of the code for Conformer is taken from [this repo](https://github.com/jreremy/conformer/tree/master)
-The conformer architecture is based on paper: ["Conformer: Convolution-augmented Transformer for Speech Recognition" Google Inc. 2020](https://arxiv.org/pdf/2005.08100)
+This repository is based on a [PyTorch Project Template](https://github.com/Blinorot/pytorch_project_template). \
+Some optimization tricks are taken from Andrej Karpathy [nanoGPT repo](https://github.com/karpathy/nanoGPT/tree/master) \
+Part of the code for Conformer is taken from [this repo](https://github.com/jreremy/conformer/tree/master) \ 
+The conformer architecture is based on paper: ["Conformer: Convolution-augmented Transformer for Speech Recognition" Google Inc. 2020](https://arxiv.org/pdf/2005.08100) \
 [FlashAttention paper](https://arxiv.org/pdf/2205.14135)
 
 ## Authors:
