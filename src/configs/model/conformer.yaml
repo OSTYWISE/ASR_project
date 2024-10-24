@@ -1,0 +1,11 @@
+_target_: src.model.Conformer
+d_input: 956
+d_model: 144
+encoder_num_layers: 16
+num_heads: 4
+kernel_size: 31
+dropout: 0.1
+feed_forward_residual_factor: 0.5
+feed_forward_expansion_factor: 4
+d_decoder: 320
+decoder_num_layers: 1

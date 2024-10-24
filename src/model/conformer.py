@@ -1,31 +1,421 @@
-from torch import nn, Tensor
-from torch.nn import Sequential
+import math
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+# Dimensions abbreviations: B = batch_size, M = d_model, T = time
 
 
-class Conformer(nn.Module):
-    """
-    Conformer model implemented by the paper:
-        https://arxiv.org/pdf/2005.08100
-    """
+class PositionalEncoder(nn.Module):
+    '''
+    Generate positional encodings used in the relative multi-head attention module.
+    These encodings are the same as the original transformer model: https://arxiv.org/abs/1706.03762
 
-    def __init__(self, n_feats: int, n_tokens: int, fc_hidden: int = 512):
-        """
-        Args:
-            n_feats (int): number of input features.
-            n_tokens (int): number of tokens in the vocabulary.
-            fc_hidden (int): number of hidden features.
-        """
-        super().__init__()
+    Parameters:
+    max_len (int): Maximum sequence length (time dimension)
 
-        self.net = Sequential(
-            nn.Linear(in_features=n_feats, out_features=fc_hidden),
-            nn.ReLU(),
-            nn.Linear(in_features=fc_hidden, out_features=fc_hidden),
-            nn.ReLU(),
-            nn.Linear(in_features=fc_hidden, out_features=n_tokens),
+    Inputs:
+    len (int): Length of encodings to retrieve
+    
+    Outputs
+    Tensor (len, d_model): Positional encodings
+    '''
+    def __init__(self, d_model, max_len=10000):
+        super(PositionalEncoder, self).__init__()
+        self.d_model = d_model
+        encodings = torch.zeros(max_len, d_model)
+        pos = torch.arange(0, max_len, dtype=torch.float)
+        inv_freq = 1 / (10000 ** (torch.arange(0.0, d_model, 2.0) / d_model))
+        encodings[:, 0::2] = torch.sin(pos[:, None] * inv_freq)
+        encodings[:, 1::2] = torch.cos(pos[:, None] * inv_freq)
+        self.register_buffer('encodings', encodings)
+        self.flash_attention = True
+        
+    def forward(self, len):
+        return self.encodings[:len, :]  # len x M, where M
+    
+
+class RelativeMultiHeadAttention(nn.Module):
+    '''
+    Relative Multi-Head Self-Attention Module (using Flash-Attention)
+    Method is proposed in Transformer-XL paper: https://arxiv.org/abs/1901.02860
+    Flash-Attention is proposed in paper: https://arxiv.org/abs/2205.14135
+
+    Parameters:
+    d_model (int): Dimension of the model
+    num_heads (int): Number of heads to split inputs into
+    dropout (float): Dropout probability
+    positional_encoder (nn.Module): PositionalEncoder module
+    
+    Inputs:
+    x (Tensor): (batch_size, time, d_model)
+    mask (Tensor): (batch_size, time, time) Optional mask to zero out attention score at certain indices
+    
+    Outputs:
+    Tensor (batch_size, time, d_model): Output tensor from the attention module.
+    '''
+    def __init__(self, d_model=144, num_heads=4, dropout=0.1, positional_encoder=PositionalEncoder(144)):
+        super(RelativeMultiHeadAttention, self).__init__()
+
+        # dimensions
+        assert d_model % num_heads == 0
+        self.d_model = d_model
+        self.d_head = d_model // num_heads
+        self.num_heads = num_heads
+
+        # Linear projection weights
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, d_model)
+        self.W_v = nn.Linear(d_model, d_model)
+        self.W_pos = nn.Linear(d_model, d_model, bias=False)
+        self.W_out = nn.Linear(d_model, d_model)
+
+        # Trainable bias parameters
+        self.u = nn.Parameter(torch.Tensor(self.num_heads, self.d_head))
+        self.v = nn.Parameter(torch.Tensor(self.num_heads, self.d_head))
+        torch.nn.init.xavier_uniform_(self.u)
+        torch.nn.init.xavier_uniform_(self.v)
+
+        self.layer_norm = nn.LayerNorm(d_model, eps=6.1e-5)
+        self.positional_encoder = positional_encoder
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None):
+        batch_size, seq_length, _ = x.size()
+
+        # Layer norm and pos embeddings
+        x = self.layer_norm(x)
+        pos_emb = self.positional_encoder(seq_length)
+        pos_emb = pos_emb.repeat(batch_size, 1, 1)  # B x T x M
+
+        # Linear projections, split into heads
+        q = self.W_q(x).view(batch_size, seq_length, self.num_heads, self.d_head)
+        k = self.W_k(x).view(batch_size, seq_length, self.num_heads, self.d_head).permute(0, 2, 3, 1)  # (B, num_heads, M, T)
+        v = self.W_v(x).view(batch_size, seq_length, self.num_heads, self.d_head).permute(0, 2, 3, 1)  # (B, num_heads, M, T)
+        pos_emb = self.W_pos(pos_emb).view(batch_size, -1, self.num_heads, self.d_head).permute(0, 2, 3, 1)  # (B, num_heads, M, T)
+
+        # Compute attention scores with relative position embeddings
+        AC = torch.matmul((q + self.u).transpose(1, 2), k)
+        BD = torch.matmul((q + self.v).transpose(1, 2), pos_emb)
+        BD = self.rel_shift(BD)
+        attn = (AC + BD) / math.sqrt(self.d_model)
+
+        # Mask before softmax with large negative number
+        if mask is not None:
+            mask = mask.unsqueeze(1)
+            mask_value = -1e+30 if attn.dtype == torch.float32 else -1e+4
+            attn.masked_fill_(mask, mask_value)
+
+        # Softmax
+        attn = F.softmax(attn, -1)
+
+        # Construct outputs from values
+        output = torch.matmul(attn, v.transpose(2, 3)).transpose(1, 2)  # (B, time, num_heads, M)
+        output = output.contiguous().view(batch_size, -1, self.d_model)  # (B, time, d_model)
+
+        # Output projections and dropout
+        output = self.W_out(output)
+        return self.dropout(output)
+
+    def rel_shift(self, emb):
+        '''
+        Pad and shift form relative positional encodings. 
+        Taken from Transformer-XL implementation: https://github.com/kimiyoung/transformer-xl/blob/master/pytorch/mem_transformer.py 
+        '''
+        batch_size, num_heads, seq_length1, seq_length2 = emb.size()
+        zeros = emb.new_zeros(batch_size, num_heads, seq_length1, 1)
+        padded_emb = torch.cat([zeros, emb], dim=-1)
+        padded_emb = padded_emb.view(batch_size, num_heads, seq_length2 + 1, seq_length1)
+        shifted_emb = padded_emb[:, :, 1:].view_as(emb)
+        return shifted_emb
+
+
+class ConvBlock(nn.Module):
+    '''
+    Conformer convolutional block.
+
+    Parameters:
+    d_model (int): Dimension of the model
+    kernel_size (int): Size of kernel to use for depthwise convolution
+    dropout (float): Dropout probability
+    
+    Inputs:
+    x (Tensor): (batch_size, time, d_model)
+    mask: Unused
+    
+    Outputs:
+    Tensor (batch_size, time, d_model): Output tensor from the convolution module
+    '''
+    def __init__(self, d_model=144, kernel_size=31, dropout=0.1):
+        super(ConvBlock, self).__init__()
+        self.layer_norm = nn.LayerNorm(d_model, eps=6.1e-5)
+        self.module = nn.Sequential(
+            nn.Conv1d(in_channels=d_model, out_channels=d_model * 2, kernel_size=1),  # first pointwise with 2x expansion
+            nn.GLU(dim=1),
+            nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=kernel_size, padding='same', groups=d_model),  # depthwise
+            nn.BatchNorm1d(d_model, eps=6.1e-5),
+            nn.SiLU(),  # swish activation
+            nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=1),  # second pointwise
+            nn.Dropout(dropout)
         )
 
-    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> dict[str, Tensor]:
+    def forward(self, x):
+        x = self.layer_norm(x)
+        x = x.transpose(1, 2)  # (batch_size, d_model, seq_len)
+        x = self.module(x)
+        return x.transpose(1, 2)
+
+
+class FeedForwardBlock(nn.Module):
+    '''
+    Conformer feed-forward block.
+
+    Parameters:
+    d_model (int): Dimension of the model
+    expansion (int): Expansion factor for first linear layer
+    dropout (float): Dropout probability
+    
+    Inputs:
+    x (Tensor): (batch_size, time, d_model)
+    mask: Unused
+    
+    Outputs:
+    Tensor (batch_size, time, d_model): Output tensor from the feed-forward module
+    '''
+    def __init__(self, d_model=144, expansion=4, dropout=0.1):
+        super(FeedForwardBlock, self).__init__()
+        self.module = nn.Sequential(
+            nn.LayerNorm(d_model, eps=6.1e-5),
+            nn.Linear(d_model, d_model * expansion),  # expand to d_model * expansion
+            nn.SiLU(),  # swish activation
+            nn.Dropout(dropout),
+            nn.Linear(d_model * expansion, d_model),  # project back to d_model
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.module(x)
+    
+
+class Conv2dSubsampling(nn.Module):
+    '''
+    2d Convolutional subsampling. 
+    Subsamples time and freq domains of input spectrograms by a factor of 4, d_model times. 
+
+    Parameters:
+    d_model (int): Dimension of the model
+    
+    Inputs:
+    x (Tensor): Input spectrogram (batch_size, time, d_input)
+    
+    Outputs:
+    Tensor (batch_size, time, d_model * (d_input // 4)): Output tensor from the conlutional subsampling module
+    '''
+    def __init__(self, d_model=144):
+        super(Conv2dSubsampling, self).__init__()
+        self.module = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=d_model, kernel_size=3, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=d_model, out_channels=d_model, kernel_size=3, stride=2),
+            nn.ReLU(),
+        )
+
+    def forward(self, x):
+        output = self.module(x.unsqueeze(1))  # (batch_size, 1, time, d_input)
+        batch_size, d_model, subsampled_time, subsampled_freq = output.size()
+        output = output.permute(0, 2, 1, 3)
+        output = output.contiguous().view(batch_size, subsampled_time, d_model * subsampled_freq)
+        return output
+
+
+class ConformerBlock(nn.Module):
+    '''
+    Conformer Encoder Block.
+
+    Parameters:
+    d_model (int): Dimension of the model
+    kernel_size (int): Size of kernel to use for depthwise convolution
+    feed_forward_residual_factor (float): output_weight for feed-forward residual connections
+    feed_forward_expansion_factor (int): Expansion factor for feed-forward block
+    num_heads (int): Number of heads to use for multi-head attention
+    positional_encoder (nn.Module): PositionalEncoder module
+    dropout (float): Dropout probability
+    
+    Inputs:
+    x (Tensor): (batch_size, time, d_model)
+    mask (Tensor): (batch_size, time, time) Optional mask to zero out attention score at certain indices
+    
+    Outputs:
+    Tensor (batch_size, time, d_model): Output tensor from the conformer block.
+    '''
+    def __init__(
+            self,
+            d_model=144,
+            kernel_size=31,
+            feed_forward_residual_factor=.5,
+            feed_forward_expansion_factor=4,
+            num_heads=4,
+            positional_encoder=PositionalEncoder(144),
+            dropout=0.1,
+    ):
+        super(ConformerBlock, self).__init__()
+        self.residual_factor = feed_forward_residual_factor
+        self.ff1 = FeedForwardBlock(d_model, feed_forward_expansion_factor, dropout)
+        self.attention = RelativeMultiHeadAttention(d_model, num_heads, dropout, positional_encoder)
+        self.conv_block = ConvBlock(d_model, kernel_size, dropout)
+        self.ff2 = FeedForwardBlock(d_model, feed_forward_expansion_factor, dropout)
+        self.layer_norm = nn.LayerNorm(d_model, eps=6.1e-5)
+
+    def forward(self, x, mask=None):
+        x = x + (self.residual_factor * self.ff1(x))
+        x = x + self.attention(x, mask=mask)
+        x = x + self.conv_block(x)
+        x = x + (self.residual_factor * self.ff2(x))
+        return self.layer_norm(x)
+
+
+class ConformerEncoder(nn.Module):
+    '''
+    Conformer Encoder Module. 
+
+    Parameters:
+    d_input (int): Dimension of the input
+    d_model (int): Dimension of the model
+    encoder_num_layers (int): Number of conformer blocks to use in the encoder
+    kernel_size (int): Size of kernel to use for depthwise convolution
+    feed_forward_residual_factor (float): output_weight for feed-forward residual connections
+    feed_forward_expansion_factor (int): Expansion factor for feed-forward block
+    num_heads (int): Number of heads to use for multi-head attention
+    dropout (float): Dropout probability
+    
+    Inputs:
+    x (Tensor): input spectrogram of dimension (batch_size, time, d_input)
+    mask (Tensor): (batch_size, time, time) Optional mask to zero out attention score at certain indices
+    
+    Outputs:
+    Tensor (batch_size, time, d_model): Output tensor from the conformer encoder
+    '''
+    def __init__(
+            self,
+            d_input=128,
+            d_model=144,
+            encoder_num_layers=16,
+            num_heads=4,
+            kernel_size=31,
+            dropout=0.1,
+            feed_forward_residual_factor=0.5,
+            feed_forward_expansion_factor=4,
+            n_tokens=28,
+    ):
+        super(ConformerEncoder, self).__init__()
+        self.conv_subsample = Conv2dSubsampling(d_model=d_model)
+        self.linear_proj = nn.Linear(d_model * ((((d_input - 3)//2 + 1) - 3)//2 + 1), d_model)  # project subsamples to d_model
+        self.dropout = nn.Dropout(p=dropout)
+        
+        # define global positional encoder to limit model parameters
+        positional_encoder = PositionalEncoder(d_model)
+        self.layers = nn.ModuleList([ConformerBlock(
+                d_model=d_model,
+                kernel_size=kernel_size,
+                feed_forward_residual_factor=feed_forward_residual_factor,
+                feed_forward_expansion_factor=feed_forward_expansion_factor,
+                num_heads=num_heads,
+                positional_encoder=positional_encoder,
+                dropout=dropout,
+            ) for _ in range(encoder_num_layers)])
+
+    def forward(self, x, mask=None):
+        x = self.conv_subsample(x)
+        if mask is not None:
+            mask = mask[:, :-2:2, :-2:2]  # account for subsampling
+            mask = mask[:, :-2:2, :-2:2]  # account for subsampling
+            assert mask.shape[1] == x.shape[1], f'{mask.shape} {x.shape}'
+            
+        x = self.linear_proj(x)
+        x = self.dropout(x)
+
+        for layer in self.layers:
+            x = layer(x, mask=mask)
+        return x  # [B, (((T - 3)//2 + 1) - 3)//2 + 1, d_model]
+
+
+class LSTMDecoder(nn.Module):
+    '''
+    LSTM Decoder
+
+    Parameters:
+    d_model (int): Output dimension of the encoder
+    d_decoder (int): Hidden dimension of the decoder
+    decoder_num_layers (int): Number of LSTM layers to use in the decoder
+    n_tokens (int): Number of output classes to predict
+    
+    Inputs:
+    x (Tensor): (batch_size, time, d_model)
+    
+    Outputs:
+    Tensor (batch_size, time, n_tokens): Class prediction logits
+    '''
+    def __init__(self, d_model=144, d_decoder=320, decoder_num_layers=1, n_tokens=28):
+        super(LSTMDecoder, self).__init__()
+        self.lstm = nn.LSTM(input_size=d_model, hidden_size=d_decoder, num_layers=decoder_num_layers, batch_first=True)
+        self.linear = nn.Linear(d_decoder, n_tokens)
+
+    def forward(self, x):
+        x, _ = self.lstm(x)
+        logits = self.linear(x)
+        return logits
+    
+
+class Conformer(nn.Module):
+    '''
+    Conformer model for ASR problem solving
+
+    Args:
+        d_input (int): Dimension of the input
+        d_model (int): Dimension of the model
+        encoder_num_layers (int): Number of conformer blocks to use in the encoder
+        num_heads (int): Number of heads to use for multi-head attention
+        kernel_size (int): Size of kernel to use for depthwise convolution
+        feed_forward_residual_factor (float): output_weight for feed-forward residual connections
+        feed_forward_expansion_factor (int): Expansion factor for feed-forward block
+        dropout (float): Dropout probability
+        d_decoder (int): Hidden dimension of the decoder
+        decoder_num_layers (int): Number of LSTM layers to use in the decoder
+        n_tokens (int): Number of output classes to predict
+    '''
+    def __init__(
+            self,
+            d_input=80,
+            d_model=144,
+            encoder_num_layers=16,
+            num_heads=4,
+            kernel_size=31,
+            feed_forward_residual_factor=0.5,
+            feed_forward_expansion_factor=4,
+            dropout=0.1,
+            d_decoder=320,
+            decoder_num_layers=1,
+            n_tokens=28
+    ):
+        super(Conformer, self).__init__()
+        self.encoder = ConformerEncoder(
+            d_input=d_input,
+            d_model=d_model,
+            encoder_num_layers=encoder_num_layers,
+            num_heads=num_heads,
+            kernel_size=kernel_size,
+            feed_forward_residual_factor=feed_forward_residual_factor,
+            feed_forward_expansion_factor=feed_forward_expansion_factor,
+            dropout=dropout
+        )
+        self.decoder = LSTMDecoder(
+            d_model=d_model,
+            d_decoder=d_decoder,
+            decoder_num_layers=decoder_num_layers,
+            n_tokens=n_tokens
+        )
+
+    def forward(self, spectrogram, spectrogram_length, **batch):
         """
         Model forward method.
 
@@ -36,12 +426,12 @@ class Conformer(nn.Module):
             output (dict): output dict containing log_probs and
                 transformed lengths.
         """
-        output = self.net(spectrogram.transpose(1, 2))
-        log_probs = nn.functional.log_softmax(output, dim=-1)
+        logits = self.decoder(self.encoder(spectrogram))
+        log_probs = nn.functional.log_softmax(logits, dim=-1)
         log_probs_length = self.transform_input_lengths(spectrogram_length)
         return {"log_probs": log_probs, "log_probs_length": log_probs_length}
 
-    def transform_input_lengths(self, input_lengths: Tensor) -> Tensor:
+    def transform_input_lengths(self, input_lengths):
         """
         As the network may compress the Time dimension, we need to know
         what are the new temporal lengths after compression.
@@ -52,78 +442,3 @@ class Conformer(nn.Module):
             output_lengths (Tensor): new temporal lengths
         """
         return input_lengths
-
-    def __str__(self):
-        """
-        Model prints with the number of parameters.
-        """
-        all_parameters = sum([p.numel() for p in self.parameters()])
-        trainable_parameters = sum(
-            [p.numel() for p in self.parameters() if p.requires_grad]
-        )
-
-        result_info = super().__str__()
-        result_info = result_info + f"\nAll parameters: {all_parameters}"
-        result_info = result_info + f"\nTrainable parameters: {trainable_parameters}"
-
-        return result_info
-
-
-class MultiHeadAttention(nn.Module):
-    def __init__(self, n_feats, n_tokens, fc_hidden=512):
-        super().__init__()
-
-        self.net = Sequential()
-
-    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
-        return None
-    
-
-class AttentionHead(nn.Module):
-    def __init__(self, n_feats, n_tokens, fc_hidden=512):
-        super().__init__()
-
-        self.net = Sequential()
-
-    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
-        return None
-
-
-class ConvBlock(nn.Module):
-    def __init__(self, n_feats, n_tokens, fc_hidden=512):
-        super().__init__()
-
-        self.net = Sequential()
-
-    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
-        return None
-
-
-class Conv2dSubsampling(nn.Module):
-    def __init__(self, n_feats, n_tokens, fc_hidden=512):
-        super().__init__()
-
-        self.net = Sequential()
-
-    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
-        return None
-
-
-class PositionalEncoder(nn.Module):
-    def __init__(self, n_feats, n_tokens, fc_hidden=512):
-        super().__init__()
-
-        self.net = Sequential()
-
-    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
-        return None
-
-
-class ConformerBlock(nn.Module):
-    def __init__(self, n_feats, n_tokens, fc_hidden=512):
-        super().__init__()
-
-        self.net = Sequential()
-
-    def forward(self, spectrogram: Tensor, spectrogram_length: Tensor, **batch) -> Tensor | None:
-        return None

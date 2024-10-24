@@ -6,6 +6,7 @@ from src.logger.utils import plot_spectrogram
 from src.metrics.tracker import MetricTracker
 from src.metrics.utils import calc_cer, calc_wer
 from src.trainer.base_trainer import BaseTrainer
+import torch
 
 
 class Trainer(BaseTrainer):
@@ -39,8 +40,8 @@ class Trainer(BaseTrainer):
         if self.is_train:
             metric_funcs = self.metrics["train"]
             self.optimizer.zero_grad()
-
-        outputs = self.model(**batch)
+        with torch.autocast(device_type=self.device, dtype=torch.bfloat16):
+            outputs = self.model(**batch)
         batch.update(outputs)  # ['audio', 'spectrogram', 'text_encoded', 'text', 'audio_path', 'spectrogram_length', 'text_encoded_length', 'log_probs', 'log_probs_length']
 
         all_losses = self.criterion(**batch)

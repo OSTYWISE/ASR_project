@@ -23,6 +23,7 @@ def main(config):
         config (DictConfig): hydra experiment config.
     """
     set_random_seed(config.trainer.seed)
+    torch.set_float32_matmul_precision('high')
 
     project_config = OmegaConf.to_container(config)
     logger = setup_saving_and_logging(config)
@@ -42,6 +43,7 @@ def main(config):
 
     # build model architecture, then print to console
     model = instantiate(config.model, n_tokens=len(text_encoder)).to(device)
+    model = torch.compile(model)
     logger.info(model)
 
     # get function handles of loss and metrics
